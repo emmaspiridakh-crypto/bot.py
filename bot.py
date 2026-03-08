@@ -27,8 +27,8 @@ ORDER_TICKET_CATEGORY_ID = 1468954499887530147
 CLAIM_REWARD_CATEGORY_ID = 1468954499887530147
 
 # Temp voice
-TEMP_VOICE_CATEGORY_ID = 1465366473030635788          # κατηγορία για temp voice
-SUPPORT_VOICE_HUB_ID = 1480255476867535089          # το "κεντρικό" support voice όπου μπαίνουν για να δημιουργηθεί temp
+TEMP_VOICE_CATEGORY_ID = 1480256776342344033        # κατηγορία για temp voice
+SUPPORT_VOICE_HUB_ID = 1480256892444872826         # το "κεντρικό" support voice όπου μπαίνουν για να δημιουργηθεί temp
 
 # Logs
 TICKET_OPEN_LOG_ID = 1468993859504705643
@@ -409,17 +409,20 @@ async def on_voice_state_update(member, before, after):
     guild = member.guild
     log_ch = guild.get_channel(VOICE_LOG_ID)
 
-    # Logging
-    if before.channel != after.channel:
-        if before.channel is None and after.channel is not None:
-            if log_ch:
-                await log_ch.send(f"🔊 {member.mention} joined voice: `{after.channel.name}`")
-        elif before.channel is not None and after.channel is None:
-            if log_ch:
-                await log_ch.send(f"🔇 {member.mention} left voice: `{before.channel.name}`")
-        else:
-            if log_ch:
-                await log_ch.send(f"🔁 {member.mention} moved: `{before.channel.name}` → `{after.channel.name}`")
+    # Logging (clean, no duplicates)
+if before.channel != after.channel:
+    if before.channel is None and after.channel is not None:
+        # Joined
+        if log_ch:
+            await log_ch.send(f"🔊 {member.mention} joined `{after.channel.name}`")
+    elif before.channel is not None and after.channel is None:
+        # Left
+        if log_ch:
+            await log_ch.send(f"🔇 {member.mention} left `{before.channel.name}`")
+    else:
+        # Moved
+        if log_ch:
+            await log_ch.send(f"🔁 {member.mention} moved `{before.channel.name}` → `{after.channel.name}`")
 
     # TEMP VOICE SYSTEM
     temp_category = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
@@ -444,18 +447,18 @@ async def on_voice_state_update(member, before, after):
 
         await member.move_to(temp_channel)
 
-    # 2) Delete ONLY temp channels (NOT the hub)
-    if before.channel:
-        # must be inside temp category
-        if before.channel.category_id == TEMP_VOICE_CATEGORY_ID:
-            # must NOT be the hub
-            if before.channel.id != SUPPORT_VOICE_HUB_ID:
-                # must be empty
-                if len(before.channel.members) == 0:
-                    try:
-                        await before.channel.delete()
-                    except:
-                        pass
+   # Delete ONLY temp channels
+if before.channel:
+    # must be inside temp category
+    if before.channel.category_id == TEMP_VOICE_CATEGORY_ID:
+        # must NOT be the hub
+        if before.channel.id != SUPPORT_VOICE_HUB_ID:
+            # must be empty
+            if len(before.channel.members) == 0:
+                try:
+                    await before.channel.delete()
+                except:
+                    pass
 
 # ================== MODERATION COMMANDS ==================
 
@@ -516,6 +519,7 @@ async def on_ready():
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
+
 
 
 
