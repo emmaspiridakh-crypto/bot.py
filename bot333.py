@@ -1,999 +1,518 @@
+
+
 import discord
 from discord.ext import commands
-import asyncio
+import os
+
+from keep_alive import keep_alive
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ==========================
-# ROLE IDs
-# ==========================
+# ================== IDS (ΒΑΛΕ ΤΑ ΔΙΚΑ ΣΟΥ) ==================
 
+# Roles
+SUPPORT_ROLE_ID = 1467220345126654185
+MANAGER_ROLE_ID = 1465360458537111582
 OWNER_ROLE_ID = 1465345430392017091
 CEO_ROLE_ID = 1465362545668788320
-MANAGER_ROLE_ID = 1465360458537111582
-STAFF_ROLE_ID = 1467220345126654185
+PURCHASE_MANAGER_ROLE_ID = 1465398543845032071
+AUTOROLE_ID = 1465357638593151331
 
-# ==========================
-# LOG CHANNEL IDs (ΒΑΛΕ ΤΑ ΔΙΚΑ ΣΟΥ)
-# ==========================
-
-TICKET_LOG_CHANNEL_ID = 1468993859504705643
-APPLICATION_LOG_CHANNEL_ID = 1468994006632366201
-VOICE_LOG_CHANNEL_ID = 1468994079646814419
-MEMBER_LOG_CHANNEL_ID = 1468994197045641387
-CHANNEL_LOG_CHANNEL_ID = 1468994309708579108
-ROLE_LOG_CHANNEL_ID = 1468994382828015810
-
+# Ticket categories
 SUPPORT_TICKET_CATEGORY_ID = 1467220343881076767
+OWNER_TICKET_CATEGORY_ID = 1467220343881076767
 BUY_TICKET_CATEGORY_ID = 1468954499887530147
-APPLICATION_CATEGORY_ID = 1468954618414497823
-SUPPORT_CALL_VC_ID = 1465366816959234109
-TEMP_SUPPORT_CATEGORY_ID = 1465366473030635788
+ORDER_TICKET_CATEGORY_ID = 1468954499887530147
+CLAIM_REWARD_CATEGORY_ID = 1468954499887530147
 
-# ==========================
-# PERMISSION FUNCTIONS
-# ==========================
+# Temp voice
+TEMP_VOICE_CATEGORY_ID = 1465366473030635788          # κατηγορία για temp voice
+SUPPORT_VOICE_HUB_ID = 1465366816959234109          # το "κεντρικό" support voice όπου μπαίνουν για να δημιουργηθεί temp
+
+# Logs
+TICKET_OPEN_LOG_ID = 1468993859504705643
+TICKET_CLOSE_LOG_ID = 1468993859504705643
+MOD_LOG_ID = 1468994006632366201
+MESSAGE_DELETE_LOG_ID = 1480240608470765690
+MESSAGE_EDIT_LOG_ID = 1480240608470765690
+JOIN_LOG_ID = 1468994197045641387
+LEAVE_LOG_ID = 1468994197045641387
+COMMAND_LOG_ID = 1468994006632366201
+ROLE_CREATE_LOG_ID = 1468994382828015810
+ROLE_DELETE_LOG_ID = 1468994382828015810
+ROLE_UPDATE_LOG_ID = 1468994382828015810
+VOICE_LOG_ID = 1468994079646814419
+
+# ================== ROLE HELPERS ==================
+
+def is_ceo(member: discord.Member):
+    return any(r.id == CEO_ROLE_ID for r in member.roles)
+
+def is_owner_or_ceo(member: discord.Member):
+    return any(r.id in [OWNER_ROLE_ID, CEO_ROLE_ID] for r in member.roles)
+
+def is_staff_or_manager(member: discord.Member):
+    return any(r.id in [SUPPORT_ROLE_ID, MANAGER_ROLE_ID, OWNER_ROLE_ID, CEO_ROLE_ID] for r in member.roles)
+
+def is_moderator(member: discord.Member):
+    return any(r.id in [SUPPORT_ROLE_ID, OWNER_ROLE_ID, CEO_ROLE_ID] for r in member.roles)
+
+# ================== TICKET CLOSE VIEW ==================
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self, opener_id: int):
+        super().__init__(timeout=None)
+        self.opener_id = opener_id
+
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.red)
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+        channel = interaction.channel
+        guild = interaction.guild
+
+        if user.id != self.opener_id and not is_staff_or_manager(user) and not is_owner_or_ceo(user):
+            return await interaction.response.send_message("❌ Δεν μπορείς να κλείσεις αυτό το ticket.", ephemeral=True)
+
+        await interaction.response.send_message("🔒 Το ticket θα κλείσει...", ephemeral=False)
+
+        log_ch = guild.get_channel(TICKET_CLOSE_LOG_ID)
+        if log_ch:
+            embed = discord.Embed(
+                title="🔒 Ticket Closed",
+                description=f"Κανάλι: {channel.mention}\nΈκλεισε από: {user.mention}",
+                color=discord.Color.red()
+            )
+            await log_ch.send(embed=embed)
+
+        await channel.delete(reason=f"Ticket closed by {user}")
+
+# ================== SUPPORT TICKET PANEL ==================
+
+class SupportTicketSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Support", emoji="🛠️", description="Γενικό support"),
+            discord.SelectOption(label="Owner Support", emoji="👑", description="Επικοινωνία με Owner/CEO"),
+        ]
+        super().__init__(placeholder="Επέλεξε κατηγορία ticket...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        user = interaction.user
+
+        if self.values[0] == "Support":
+            category = guild.get_channel(SUPPORT_TICKET_CATEGORY_ID)
+            allowed_roles = [SUPPORT_ROLE_ID, MANAGER_ROLE_ID]
+            ticket_type = "Support"
+            prefix = "support"
+        else:
+            category = guild.get_channel(OWNER_TICKET_CATEGORY_ID)
+            allowed_roles = [OWNER_ROLE_ID, CEO_ROLE_ID]
+            ticket_type = "Owner Ticket"
+            prefix = "owner"
+
+        if not category or not isinstance(category, discord.CategoryChannel):
+            return await interaction.response.send_message("❌ Δεν βρέθηκε σωστή κατηγορία για αυτό το ticket.", ephemeral=True)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        }
+
+        for rid in allowed_roles:
+            role = guild.get_role(rid)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+        name = f"{prefix}-{user.name}".replace(" ", "-").lower()
+        channel = await guild.create_text_channel(
+            name=name,
+            category=category,
+            overwrites=overwrites,
+            reason=f"{ticket_type} ticket από {user}"
+        )
+
+        embed = discord.Embed(
+            title=f"🎫 {ticket_type} Ticket",
+            description=f"{user.mention} άνοιξε **{ticket_type}** ticket.\nΠεριμένετε απάντηση από την ομάδα.",
+            color=discord.Color.blue()
+        )
+        await channel.send(embed=embed, view=TicketCloseView(opener_id=user.id))
+
+        log_ch = guild.get_channel(TICKET_OPEN_LOG_ID)
+        if log_ch:
+            log = discord.Embed(
+                title="📂 Νέο Ticket",
+                description=f"Τύπος: **{ticket_type}**\nΧρήστης: {user.mention}\nΚανάλι: {channel.mention}",
+                color=discord.Color.green()
+            )
+            await log_ch.send(embed=log)
+
+        await interaction.response.send_message(f"✅ Το ticket σου δημιουργήθηκε: {channel.mention}", ephemeral=True)
 
 
-def is_staff_or_higher(user):
-    staff_roles = {STAFF_ROLE_ID, MANAGER_ROLE_ID, CEO_ROLE_ID, OWNER_ROLE_ID}
-    return any(role.id in staff_roles for role in user.roles)
+class SupportTicketPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(SupportTicketSelect())
+
+# ================== BUY TICKET PANEL ==================
+
+class BuyTicketSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Claim Reward", emoji="🎁", description="Claim your Reward "),
+            discord.SelectOption(label="Buy", emoji="🛒", description="Αγορά"),
+            discord.SelectOption(label="Order", emoji="📦", description="Παραγγελία"),
+        ]
+        super().__init__(placeholder="Επέλεξε ένα category...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        user = interaction.user
+
+        if self.values[0] == "Claim Reward":
+            category = guild.get_channel(CLAIM_REWARD_CATEGORY_ID)
+            allowed_roles = [OWNER_ROLE_ID, CEO_ROLE_ID]
+            ticket_type = "Claim Reward"
+            prefix = "claim"
+        elif self.values[0] == "Buy":
+            category = guild.get_channel(BUY_TICKET_CATEGORY_ID)
+            allowed_roles = [PURCHASE_MANAGER_ROLE_ID, OWNER_ROLE_ID, CEO_ROLE_ID]
+            ticket_type = "Buy"
+            prefix = "buy"
+        else:
+            category = guild.get_channel(ORDER_TICKET_CATEGORY_ID)
+            allowed_roles = [OWNER_ROLE_ID, CEO_ROLE_ID]
+            ticket_type = "Order"
+            prefix = "order"
+
+        if not category or not isinstance(category, discord.CategoryChannel):
+            return await interaction.response.send_message("❌ Δεν βρέθηκε σωστή κατηγορία για αυτό το ticket.", ephemeral=True)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        }
+
+        for rid in allowed_roles:
+            role = guild.get_role(rid)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+        name = f"{prefix}-{user.name}".replace(" ", "-").lower()
+        channel = await guild.create_text_channel(
+            name=name,
+            category=category,
+            overwrites=overwrites,
+            reason=f"{ticket_type} ticket από {user}"
+        )
+
+        embed = discord.Embed(
+            title=f"💳 {ticket_type} Ticket",
+            description=f"{user.mention} άνοιξε **{ticket_type}** ticket.\nΠεριμένετε απάντηση από την ομάδα.",
+            color=discord.Color.gold()
+        )
+        await channel.send(embed=embed, view=TicketCloseView(opener_id=user.id))
+
+        log_ch = guild.get_channel(TICKET_OPEN_LOG_ID)
+        if log_ch:
+            log = discord.Embed(
+                title="📂 Νέο Buy Ticket",
+                description=f"Τύπος: **{ticket_type}**\nΧρήστης: {user.mention}\nΚανάλι: {channel.mention}",
+                color=discord.Color.orange()
+            )
+            await log_ch.send(embed=log)
+
+        await interaction.response.send_message(f"✅ Το ticket σου δημιουργήθηκε: {channel.mention}", ephemeral=True)
 
 
-def is_owner_or_ceo(user):
-    high_roles = {CEO_ROLE_ID, OWNER_ROLE_ID}
-    return any(role.id in high_roles for role in user.roles)
+class BuyTicketPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(BuyTicketSelect())
 
+# ================== PANEL COMMANDS ==================
 
-# ==========================
-# LOG SYSTEM
-# ==========================
+@bot.command()
+async def supportpanel(ctx):
+    if not is_owner_or_ceo(ctx.author):
+        return await ctx.reply("❌ Δεν έχεις δικαίωμα.")
+    embed = discord.Embed(
+        title="🆘 Support Tickets",
+        description="Επέλεξε την κατηγορία που ταιριάζει στο αίτημά σου.",
+        color=0x2b2d31
+    )
+    await ctx.send(embed=embed, view=SupportTicketPanel())
 
-from discord import Embed
+@bot.command()
+async def buypanel(ctx):
+    if not is_owner_or_ceo(ctx.author):
+        return await ctx.reply("❌ Δεν έχεις δικαίωμα.")
+    embed = discord.Embed(
+        title="💳 Buy Tickets",
+        description="Επέλεξε την κατηγορία Ticket που θέλεις.",
+        color=0x2b2d31
+    )
+    await ctx.send(embed=embed, view=BuyTicketPanel())
 
+# ================== SAY / DMALL ==================
 
-# --------------------------
-# TICKET LOGS
-# --------------------------
-async def log_ticket_open(channel, user, staff=None):
-    log = channel.guild.get_channel(TICKET_LOG_CHANNEL_ID)
-    if not log:
-        return
+@bot.command()
+async def say(ctx, *, message: str):
+    if not is_ceo(ctx.author):
+        return await ctx.reply("❌ Μόνο ο CEO.")
+    await ctx.message.delete()
+    await ctx.send(message)
 
-    embed = Embed(title="🎫 Ticket Opened", color=0x00ff00)
-    embed.add_field(name="User", value=f"{user} (`{user.id}`)", inline=False)
-    if staff:
-        embed.add_field(name="Opened by Staff",
-                        value=f"{staff} (`{staff.id}`)",
-                        inline=False)
-    embed.add_field(name="Channel", value=channel.mention, inline=False)
-    embed.timestamp = discord.utils.utcnow()
+class DmApproveView(discord.ui.View):
+    def __init__(self, content: str, author_id: int):
+        super().__init__(timeout=60)
+        self.content = content
+        self.author_id = author_id
 
-    await log.send(embed=embed)
+    @discord.ui.button(label="✅ APPROVE SEND", style=discord.ButtonStyle.green)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id or not is_ceo(interaction.user):
+            return await interaction.response.send_message("❌ Δεν μπορείς να εγκρίνεις αυτό το DM.", ephemeral=True)
 
+        await interaction.response.send_message("📨 Στέλνω DM σε όλα τα μέλη...", ephemeral=True)
 
-async def log_ticket_close(channel, staff):
-    log = channel.guild.get_channel(TICKET_LOG_CHANNEL_ID)
-    if not log:
-        return
+        sent = 0
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+            try:
+                await member.send(self.content)
+                sent += 1
+            except:
+                continue
 
-    embed = Embed(title="🧨 Ticket Closed", color=0xff0000)
-    embed.add_field(name="Closed by",
-                    value=f"{staff} (`{staff.id}`)",
-                    inline=False)
-    embed.add_field(name="Channel", value=channel.name, inline=False)
-    embed.timestamp = discord.utils.utcnow()
+        await interaction.followup.send(f"✅ Το DM στάλθηκε σε **{sent}** μέλη.", ephemeral=True)
+        self.stop()
 
-    await log.send(embed=embed)
+@bot.command()
+async def dmall(ctx, *, message: str):
+    if not is_ceo(ctx.author):
+        return await ctx.reply("❌ Μόνο ο CEO.")
+    embed = discord.Embed(
+        title="📨 DM to all — Pending",
+        description=f"Μήνυμα:\n```{message}```\n\nΠάτα **APPROVE** για να σταλεί σε όλα τα μέλη.",
+        color=discord.Color.purple()
+    )
+    await ctx.send(embed=embed, view=DmApproveView(content=message, author_id=ctx.author.id))
 
-
-# --------------------------
-# APPLICATION LOGS
-# --------------------------
-
-
-async def log_application_open(channel, user):
-    log = channel.guild.get_channel(APPLICATION_LOG_CHANNEL_ID)
-    if not log:
-        return
-
-    embed = Embed(title="📨 Application Opened", color=0x3498db)
-    embed.add_field(name="Applicant",
-                    value=f"{user} (`{user.id}`)",
-                    inline=False)
-    embed.add_field(name="Channel", value=channel.mention, inline=False)
-    embed.timestamp = discord.utils.utcnow()
-
-    await log.send(embed=embed)
-
-
-async def log_application_status(channel,
-                                 applicant,
-                                 staff,
-                                 status,
-                                 reason=None):
-    log = channel.guild.get_channel(APPLICATION_LOG_CHANNEL_ID)
-    if not log:
-        return
-
-    color = 0x2ecc71 if status == "accepted" else 0xe74c3c
-
-    embed = Embed(title=f"📌 Application {status.upper()}", color=color)
-    embed.add_field(name="Applicant",
-                    value=f"{applicant} (`{applicant.id}`)",
-                    inline=False)
-    embed.add_field(name="Staff",
-                    value=f"{staff} (`{staff.id}`)",
-                    inline=False)
-    embed.add_field(name="Channel", value=channel.mention, inline=False)
-
-    if reason:
-        embed.add_field(name="Reason", value=reason, inline=False)
-
-    embed.timestamp = discord.utils.utcnow()
-
-    await log.send(embed=embed)
-
-
-async def log_application_close(channel, staff):
-    log = channel.guild.get_channel(APPLICATION_LOG_CHANNEL_ID)
-    if not log:
-        return
-
-    embed = Embed(title="📪 Application Closed", color=0x95a5a6)
-    embed.add_field(name="Closed by",
-                    value=f"{staff} (`{staff.id}`)",
-                    inline=False)
-    embed.add_field(name="Channel", value=channel.name, inline=False)
-    embed.timestamp = discord.utils.utcnow()
-
-    await log.send(embed=embed)
-
-
-# --------------------------
-# VOICE LOGS
-# --------------------------
-
+# ================== AUTOROLE ==================
 
 @bot.event
-async def on_voice_state_update(member, before, after):
-    log = member.guild.get_channel(VOICE_LOG_CHANNEL_ID)
-    if not log:
-        return
+async def on_member_join(member: discord.Member):
+    role = member.guild.get_role(AUTOROLE_ID)
+    if role:
+        try:
+            await member.add_roles(role, reason="Autorole")
+        except:
+            pass
 
-    # Join
-    if before.channel is None and after.channel is not None:
-        embed = Embed(
-            title="🔊 Voice Join",
-            description=f"{member.mention} μπήκε στο {after.channel.mention}",
-            color=0x2ecc71)
-        embed.timestamp = discord.utils.utcnow()
-        await log.send(embed=embed)
-
-    # Leave
-    elif before.channel is not None and after.channel is None:
-        embed = Embed(
-            title="🔇 Voice Leave",
-            description=f"{member.mention} βγήκε από {before.channel.mention}",
-            color=0xe74c3c)
-        embed.timestamp = discord.utils.utcnow()
-        await log.send(embed=embed)
-
-    # Move
-    elif before.channel and after.channel and before.channel.id != after.channel.id:
-        embed = Embed(
-            title="🔁 Voice Move",
-            description=
-            f"{member.mention} μετακινήθηκε από {before.channel.mention} → {after.channel.mention}",
-            color=0xf1c40f)
-        embed.timestamp = discord.utils.utcnow()
-        await log.send(embed=embed)
-
-
-# --------------------------
-# MEMBER LOGS
-# --------------------------
-
+    log_ch = member.guild.get_channel(JOIN_LOG_ID)
+    if log_ch:
+        await log_ch.send(f"✅ Member joined: {member.mention} ({member.id})")
 
 @bot.event
-async def on_member_join(member):
-    log = member.guild.get_channel(MEMBER_LOG_CHANNEL_ID)
-    if not log:
-        return
+async def on_member_remove(member: discord.Member):
+    log_ch = member.guild.get_channel(LEAVE_LOG_ID)
+    if log_ch:
+        await log_ch.send(f"❌ Member left: {member.mention} ({member.id})")
 
-    embed = Embed(title="✅ Member Joined",
-                  description=f"{member} (`{member.id}`) μπήκε στον server.",
-                  color=0x2ecc71)
-    embed.timestamp = discord.utils.utcnow()
-    await log.send(embed=embed)
-
+# ================== MESSAGE LOGS ==================
 
 @bot.event
-async def on_member_remove(member):
-    log = member.guild.get_channel(MEMBER_LOG_CHANNEL_ID)
-    if not log:
+async def on_message_delete(message: discord.Message):
+    if message.author.bot or not message.guild:
         return
-
-    embed = Embed(
-        title="❌ Member Left",
-        description=f"{member} (`{member.id}`) έφυγε από τον server.",
-        color=0xe74c3c)
-    embed.timestamp = discord.utils.utcnow()
-    await log.send(embed=embed)
-
-
-# --------------------------
-# CHANNEL LOGS
-# --------------------------
-
+    log_ch = message.guild.get_channel(MESSAGE_DELETE_LOG_ID)
+    if log_ch:
+        embed = discord.Embed(
+            title="🗑️ Message Deleted",
+            description=f"**User:** {message.author.mention}\n**Channel:** {message.channel.mention}\n**Content:**\n{message.content}",
+            color=discord.Color.red()
+        )
+        await log_ch.send(embed=embed)
 
 @bot.event
-async def on_guild_channel_create(channel):
-    log = channel.guild.get_channel(CHANNEL_LOG_CHANNEL_ID)
-    if not log:
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    if before.author.bot or not before.guild:
         return
+    if before.content == after.content:
+        return
+    log_ch = before.guild.get_channel(MESSAGE_EDIT_LOG_ID)
+    if log_ch:
+        embed = discord.Embed(
+            title="✏️ Message Edited",
+            description=f"**User:** {before.author.mention}\n**Channel:** {before.channel.mention}",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Before", value=before.content or "‎", inline=False)
+        embed.add_field(name="After", value=after.content or "‎", inline=False)
+        await log_ch.send(embed=embed)
 
-    embed = Embed(title="📁 Channel Created",
-                  description=f"{channel.mention} δημιουργήθηκε.",
-                  color=0x2ecc71)
-    embed.timestamp = discord.utils.utcnow()
-    await log.send(embed=embed)
+# ================== COMMAND LOGS ==================
 
+@bot.listen("on_command")
+async def on_any_command(ctx: commands.Context):
+    log_ch = ctx.guild.get_channel(COMMAND_LOG_ID) if ctx.guild else None
+    if log_ch:
+        await log_ch.send(f"🧾 Command used: `{ctx.message.content}` by {ctx.author.mention} in {ctx.channel.mention}")
+
+# ================== ROLE LOGS ==================
 
 @bot.event
-async def on_guild_channel_delete(channel):
-    log = channel.guild.get_channel(CHANNEL_LOG_CHANNEL_ID)
-    if not log:
-        return
-
-    embed = Embed(title="🗑️ Channel Deleted",
-                  description=f"{channel.name} διαγράφηκε.",
-                  color=0xe74c3c)
-    embed.timestamp = discord.utils.utcnow()
-    await log.send(embed=embed)
-
-
-# --------------------------
-# ROLE LOGS
-# --------------------------
-
+async def on_guild_role_create(role: discord.Role):
+    log_ch = role.guild.get_channel(ROLE_CREATE_LOG_ID)
+    if log_ch:
+        await log_ch.send(f"🆕 Role created: `{role.name}` ({role.id})")
 
 @bot.event
-async def on_member_update(before, after):
-    log = after.guild.get_channel(ROLE_LOG_CHANNEL_ID)
-    if not log:
-        return
+async def on_guild_role_delete(role: discord.Role):
+    log_ch = role.guild.get_channel(ROLE_DELETE_LOG_ID)
+    if log_ch:
+        await log_ch.send(f"🗑️ Role deleted: `{role.name}` ({role.id})")
 
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    # Role add/remove
     before_roles = set(before.roles)
     after_roles = set(after.roles)
 
     added = after_roles - before_roles
     removed = before_roles - after_roles
 
+    guild = after.guild
+    log_ch = guild.get_channel(ROLE_UPDATE_LOG_ID)
+    if not log_ch:
+        return
+
     for role in added:
-        embed = Embed(title="➕ Role Added",
-                      description=f"{after} πήρε τον ρόλο {role.mention}",
-                      color=0x2ecc71)
-        embed.timestamp = discord.utils.utcnow()
-        await log.send(embed=embed)
+        if role.is_default():
+            continue
+        await log_ch.send(f"➕ Role `{role.name}` added to {after.mention}")
 
     for role in removed:
-        embed = Embed(title="➖ Role Removed",
-                      description=f"{after} έχασε τον ρόλο {role.mention}",
-                      color=0xe74c3c)
-        embed.timestamp = discord.utils.utcnow()
-        await log.send(embed=embed)
-
-
-# ==========================
-# APPLICATION PANELS
-# ==========================
-
-
-class StaffApplicationPanel(discord.ui.View):
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Apply for Staff",
-                       style=discord.ButtonStyle.primary)
-    async def apply_staff(self, interaction, button):
-        modal = StaffApplicationModal()
-        await interaction.response.send_modal(modal)
-
-
-class ManagerApplicationPanel(discord.ui.View):
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Apply for Manager",
-                       style=discord.ButtonStyle.danger)
-    async def apply_manager(self, interaction, button):
-        modal = ManagerApplicationModal()
-        await interaction.response.send_modal(modal)
-
-
-# ==========================
-# STAFF APPLICATION MODAL
-# ==========================
-
-
-class StaffApplicationModal(discord.ui.Modal, title="Staff Application"):
-
-    q1 = discord.ui.TextInput(label="Πόσο χρονών είσαι;",
-                              style=discord.TextStyle.short)
-    q2 = discord.ui.TextInput(
-        label="Πόσες ώρες θα μπορείς να είσαι on duty την μέρα;",
-        style=discord.TextStyle.short)
-    q3 = discord.ui.TextInput(label="Τι είναι η ιεραρχία για σένα;",
-                              style=discord.TextStyle.paragraph)
-    q4 = discord.ui.TextInput(label="Έχεις εμπειρία πάνω στο staff κομμάτι;",
-                              style=discord.TextStyle.paragraph)
-    q5 = discord.ui.TextInput(label="Πες 3 βασικά rules του server",
-                              style=discord.TextStyle.paragraph)
-    q6 = discord.ui.TextInput(
-        label="Τι θα κάνεις αν δεν μπορείς να βοηθήσεις κάποιον;",
-        style=discord.TextStyle.paragraph)
-    q7 = discord.ui.TextInput(
-        label="Πως θα αντιδράσεις σε αντιεπαγγελματική συμπεριφορά staff;",
-        style=discord.TextStyle.paragraph)
-
-    async def on_submit(self, interaction):
-        guild = interaction.guild
-        category = guild.get_channel(APPLICATION_CATEGORY_ID)
-
-        channel = await guild.create_text_channel(
-            name=f"staff-app-{interaction.user.name}",
-            category=category,
-            overwrites={
-                guild.default_role:
-                discord.PermissionOverwrite(view_channel=False),
-                guild.get_role(OWNER_ROLE_ID):
-                discord.PermissionOverwrite(view_channel=True,
-                                            send_messages=True),
-                guild.get_role(CEO_ROLE_ID):
-                discord.PermissionOverwrite(view_channel=True,
-                                            send_messages=True),
-            })
-
-        # LOG: Application Open
-        await log_application_open(channel, interaction.user)
-
-        embed = discord.Embed(title="Νέα Staff Αίτηση",
-                              color=discord.Color.blue())
-        embed.add_field(name="User",
-                        value=f"{interaction.user} ({interaction.user.id})",
-                        inline=False)
-        embed.add_field(name="Πόσο χρονών είσαι;",
-                        value=self.q1.value,
-                        inline=False)
-        embed.add_field(name="Ώρες on duty", value=self.q2.value, inline=False)
-        embed.add_field(name="Τι είναι η ιεραρχία;",
-                        value=self.q3.value,
-                        inline=False)
-        embed.add_field(name="Εμπειρία staff",
-                        value=self.q4.value,
-                        inline=False)
-        embed.add_field(name="3 βασικά rules",
-                        value=self.q5.value,
-                        inline=False)
-        embed.add_field(name="Αν δεν μπορείς να βοηθήσεις",
-                        value=self.q6.value,
-                        inline=False)
-        embed.add_field(name="Αντιεπαγγελματική συμπεριφορά staff",
-                        value=self.q7.value,
-                        inline=False)
-
-        await channel.send(embed=embed,
-                           view=ApplicationDecisionView(interaction.user.id))
-        await interaction.response.send_message("Η αίτησή σου στάλθηκε!",
-                                                ephemeral=True)
-
-
-# ==========================
-# MANAGER APPLICATION MODAL
-# ==========================
-
-
-class ManagerApplicationModal(discord.ui.Modal, title="Manager Application"):
-
-    q1 = discord.ui.TextInput(label="Πόσο χρονών είσαι;",
-                              style=discord.TextStyle.short)
-    q2 = discord.ui.TextInput(
-        label="Πόσες ώρες θα μπορείς να είσαι on duty την ημέρα;",
-        style=discord.TextStyle.short)
-    q3 = discord.ui.TextInput(label="Ανέφερε 3 βασικά rules του server",
-                              style=discord.TextStyle.paragraph)
-    q4 = discord.ui.TextInput(label="Τι είναι η ιεραρχία για σένα;",
-                              style=discord.TextStyle.paragraph)
-    q5 = discord.ui.TextInput(
-        label="Έχεις εμπειρία πάνω στο κομμάτι management;",
-        style=discord.TextStyle.paragraph)
-    q6 = discord.ui.TextInput(
-        label="Πως θα αντιμετώπιζες μια δύσκολη σύγκρουση στο team;",
-        style=discord.TextStyle.paragraph)
-    q7 = discord.ui.TextInput(
-        label="Τι θα έκανες αν κάποιος δεν άκουγε τις εντολές σου;",
-        style=discord.TextStyle.paragraph)
-    q8 = discord.ui.TextInput(
-        label="Τι θα έκανες αν δεν σου αρέσει εντολή ανώτερου;",
-        style=discord.TextStyle.paragraph)
-
-    async def on_submit(self, interaction):
-        guild = interaction.guild
-        category = guild.get_channel(APPLICATION_CATEGORY_ID)
-
-        channel = await guild.create_text_channel(
-            name=f"manager-app-{interaction.user.name}",
-            category=category,
-            overwrites={
-                guild.default_role:
-                discord.PermissionOverwrite(view_channel=False),
-                guild.get_role(OWNER_ROLE_ID):
-                discord.PermissionOverwrite(view_channel=True,
-                                            send_messages=True),
-                guild.get_role(CEO_ROLE_ID):
-                discord.PermissionOverwrite(view_channel=True,
-                                            send_messages=True),
-            })
-
-        # LOG: Application Open
-        await log_application_open(channel, interaction.user)
-
-        embed = discord.Embed(title="Νέα Manager Αίτηση",
-                              color=discord.Color.green())
-        embed.add_field(name="User",
-                        value=f"{interaction.user} ({interaction.user.id})",
-                        inline=False)
-        embed.add_field(name="Πόσο χρονών είσαι;",
-                        value=self.q1.value,
-                        inline=False)
-        embed.add_field(name="Ώρες on duty", value=self.q2.value, inline=False)
-        embed.add_field(name="3 βασικά rules",
-                        value=self.q3.value,
-                        inline=False)
-        embed.add_field(name="Τι είναι η ιεραρχία;",
-                        value=self.q4.value,
-                        inline=False)
-        embed.add_field(name="Εμπειρία management",
-                        value=self.q5.value,
-                        inline=False)
-        embed.add_field(name="Αντιμετώπιση σύγκρουσης",
-                        value=self.q6.value,
-                        inline=False)
-        embed.add_field(name="Αν δεν ακούει εντολές",
-                        value=self.q7.value,
-                        inline=False)
-        embed.add_field(name="Αν δεν σου αρέσει εντολή ανώτερου",
-                        value=self.q8.value,
-                        inline=False)
-
-        await channel.send(embed=embed,
-                           view=ApplicationDecisionView(interaction.user.id))
-        await interaction.response.send_message("Η αίτησή σου στάλθηκε!",
-                                                ephemeral=True)
-
-
-# ==========================
-# ACCEPT / DENY BUTTONS
-# ==========================
-
-
-class ApplicationDecisionView(discord.ui.View):
-
-    def __init__(self, user_id):
-        super().__init__(timeout=None)
-        self.user_id = user_id
-
-    @discord.ui.button(label="Accept with reason",
-                       style=discord.ButtonStyle.success)
-    async def accept(self, interaction, button):
-        if not is_owner_or_ceo(interaction.user):
-            return await interaction.response.send_message(
-                "Δεν έχεις δικαίωμα.", ephemeral=True)
-
-        modal = AcceptModal(self.user_id)
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="Denied with reason",
-                       style=discord.ButtonStyle.danger)
-    async def deny(self, interaction, button):
-        if not is_owner_or_ceo(interaction.user):
-            return await interaction.response.send_message(
-                "Δεν έχεις δικαίωμα.", ephemeral=True)
-
-        modal = DenyModal(self.user_id)
-        await interaction.response.send_modal(modal)
-
-
-# ==========================
-# ACCEPT MODAL
-# ==========================
-
-
-class AcceptModal(discord.ui.Modal, title="Accept Application"):
-    reason = discord.ui.TextInput(label="Reason",
-                                  style=discord.TextStyle.paragraph)
-
-    def __init__(self, user_id):
-        super().__init__()
-        self.user_id = user_id
-
-    async def on_submit(self, interaction):
-        guild = interaction.guild
-        applicant = guild.get_member(self.user_id)
-
-        # LOG: Accepted
-        await log_application_status(interaction.channel, applicant,
-                                     interaction.user, "accepted",
-                                     self.reason.value)
-
-        await interaction.response.send_message("Η αίτηση έγινε **δεκτή**.",
-                                                ephemeral=True)
-
-
-# ==========================
-# DENY MODAL
-# ==========================
-
-
-class DenyModal(discord.ui.Modal, title="Deny Application"):
-    reason = discord.ui.TextInput(label="Reason",
-                                  style=discord.TextStyle.paragraph)
-
-    def __init__(self, user_id):
-        super().__init__()
-        self.user_id = user_id
-
-    async def on_submit(self, interaction):
-        guild = interaction.guild
-        applicant = guild.get_member(self.user_id)
-
-        # LOG: Denied
-        await log_application_status(interaction.channel, applicant,
-                                     interaction.user, "denied",
-                                     self.reason.value)
-
-        await interaction.response.send_message("Η αίτηση **απορρίφθηκε**.",
-                                                ephemeral=True)
-
-
-# ==========================
-# SUPPORT TICKET PANEL
-# ==========================
-
-
-class SupportTicketPanel(discord.ui.View):
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Support📞", style=discord.ButtonStyle.green)
-    async def general_support(self, interaction, button):
-        await create_ticket(interaction,
-                            ticket_type="support",
-                            category_id=SUPPORT_TICKET_CATEGORY_ID,
-                            allowed_roles=[
-                                STAFF_ROLE_ID, MANAGER_ROLE_ID, CEO_ROLE_ID,
-                                OWNER_ROLE_ID
-                            ])
-
-    @discord.ui.button(label="Owner👑", style=discord.ButtonStyle.green)
-    async def report(self, interaction, button):
-        await create_ticket(interaction,
-                            ticket_type="owner",
-                            category_id=SUPPORT_TICKET_CATEGORY_ID,
-                            allowed_roles=[CEO_ROLE_ID, OWNER_ROLE_ID])
-
-
-# ==========================
-# BUY TICKET PANEL
-# ==========================
-
-
-class BuyTicketPanel(discord.ui.View):
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Buy💸", style=discord.ButtonStyle.green)
-    async def buy_product(self, interaction, button):
-        await create_ticket(interaction,
-                            ticket_type="buy",
-                            category_id=BUY_TICKET_CATEGORY_ID,
-                            allowed_roles=[
-                                STAFF_ROLE_ID, MANAGER_ROLE_ID, CEO_ROLE_ID,
-                                OWNER_ROLE_ID
-                            ])
-
-    @discord.ui.button(label="Order📦", style=discord.ButtonStyle.green)
-    async def order(self, interaction, button):
-        await create_ticket(
-            interaction,
-            ticket_type="Order",
-            category_id=BUY_TICKET_CATEGORY_ID,
-            allowed_roles=[MANAGER_ROLE_ID, CEO_ROLE_ID, OWNER_ROLE_ID])
-
-    @discord.ui.button(label="Claim Reward🏆", style=discord.ButtonStyle.green)
-    async def claim_reward(self, interaction, button):
-        await create_ticket(interaction,
-                            ticket_type="buy",
-                            category_id=BUY_TICKET_CATEGORY_ID,
-                            allowed_roles=[
-                                STAFF_ROLE_ID, MANAGER_ROLE_ID, CEO_ROLE_ID,
-                                OWNER_ROLE_ID
-                            ])
-
-
-# ==========================
-# TICKET CLOSE BUTTON
-# ==========================
-
-
-class TicketCloseView(discord.ui.View):
-
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger)
-    async def close_ticket(self, interaction, button):
-        if not is_staff_or_higher(interaction.user):
-            return await interaction.response.send_message(
-                "Δεν έχεις δικαίωμα.", ephemeral=True)
-
-        await interaction.response.send_message(
-            "Το ticket θα κλείσει σε 5 δευτερόλεπτα…", ephemeral=True)
-        await asyncio.sleep(5)
-
-        # LOG: Ticket Close
-        await log_ticket_close(interaction.channel, interaction.user)
-
-        try:
-            await interaction.channel.delete(reason="Ticket closed")
-        except:
-            pass
-
-
-# ==========================
-# TICKET CREATION FUNCTION
-# ==========================
-
-
-async def create_ticket(interaction, ticket_type, category_id, allowed_roles):
-    guild = interaction.guild
-    category = guild.get_channel(category_id)
-
-    overwrites = {
-        guild.default_role:
-        discord.PermissionOverwrite(view_channel=False),
-        interaction.user:
-        discord.PermissionOverwrite(view_channel=True, send_messages=True)
-    }
-
-    # Add staff roles
-    for role_id in allowed_roles:
-        role = guild.get_role(role_id)
-        if role:
-            overwrites[role] = discord.PermissionOverwrite(view_channel=True,
-                                                           send_messages=True)
-
-    # Create channel
-    channel = await guild.create_text_channel(
-        name=f"{ticket_type}-{interaction.user.name}",
-        category=category,
-        overwrites=overwrites)
-
-    # LOG: Ticket Open
-    await log_ticket_open(channel, interaction.user, staff=interaction.user)
-
-    embed = discord.Embed(
-        title=f"{ticket_type.capitalize()} Ticket",
-        description="Ένα μέλος του staff θα σε εξυπηρετήσει σύντομα.",
-        color=discord.Color.dark_green())
-
-    await channel.send(embed=embed, view=TicketCloseView())
-    await interaction.response.send_message(
-        f"Το ticket σου δημιουργήθηκε: {channel.mention}", ephemeral=True)
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def supportpanel(ctx):
-    embed = discord.Embed(
-        title="📞 Support Ticket",
-        description="Επίλεξε τι χρειάζεσαι από τα κουμπιά παρακάτω.",
-        color=discord.Color.green()
-    )
-
-    await ctx.send(embed=embed, view=SupportTicketPanel())
-    await ctx.send("Το support panel στάλθηκε επιτυχώς.", delete_after=5)
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def buypanel(ctx):
-    embed = discord.Embed(
-        title="💸 Buy / Order / Claim",
-        description="Επίλεξε τι θέλεις να κάνεις.",
-        color=discord.Color.green()
-    )
-
-    await ctx.send(embed=embed, view=BuyTicketPanel())
-    await ctx.send("Το buy panel στάλθηκε επιτυχώς.", delete_after=5)
-
-# ==========================
-# SEND PANELS COMMAND
-# ==========================
-
-
-@bot.command()
-async def send(ctx, panel_type=None, panel_name=None):
-    if panel_type is None or panel_name is None:
-        return await ctx.reply("Χρησιμοποίησε:\n"
-                               "`!send staff panel`\n"
-                               "`!send managers panel`")
-
-    panel_type = panel_type.lower()
-    panel_name = panel_name.lower()
-
-    # SUPPORT PANEL
-    if panel_type == "support" and panel_name == "panel":
-        if not is_staff_or_higher(ctx.author):
-            return await ctx.reply("Δεν έχεις δικαίωμα.")
-        embed = discord.Embed(
-            title="Support Panel",
-            description=
-            "Αν χρειάζεσαι βοήθεια ή έχεις κάποια ερώτηση πάτα για να ανοίξεις ένα ticket🎫!",
-            color=discord.Color.gold())
-        return await ctx.send(embed=embed, view=SupportTicketPanel())
-
-    # BUY PANEL
-    if panel_type == "buy" and panel_name == "panel":
-        if not is_staff_or_higher(ctx.author):
-            return await ctx.reply("Δεν έχεις δικαίωμα.")
-        embed = discord.Embed(
-            title="Buy Panel",
-            description=
-            "Αν θες να αγοράσεις κάτι, να κάνεις μια παραγγελία ή να συλλέξεις το reward σου, πάτα για να ανοίξεις το αντίστοιχο ticket",
-            color=discord.Color.dark_green())
-        return await ctx.send(embed=embed, view=BuyTicketPanel())
-
-    # STAFF APPLICATION PANEL
-    if panel_type == "staff" and panel_name == "panel":
-        if not is_owner_or_ceo(ctx.author):
-            return await ctx.reply("Μόνο Owner/CEO.")
-        embed = discord.Embed(
-            title="Staff Application Panel",
-            description="Πατήστε το κουμπί για να κάνετε αίτηση Staff.",
-            color=discord.Color.dark_grey())
-        return await ctx.send(embed=embed, view=StaffApplicationPanel())
-
-    # MANAGERS APPLICATION PANEL
-    if panel_type == "managers" and panel_name == "panel":
-        if not is_owner_or_ceo(ctx.author):
-            return await ctx.reply("Μόνο Owner/CEO.")
-        embed = discord.Embed(
-            title="Managers Application Panel",
-            description="Πατήστε το κουμπί για να κάνετε αίτηση Manager.",
-            color=discord.Color.dark_gray())
-        return await ctx.send(embed=embed, view=ManagerApplicationPanel())
-
-    await ctx.reply("Λάθος χρήση εντολής.")
-
-
-
-# ==========================
-# SAY COMMAND
-# ==========================
-
-
-@bot.command()
-async def say(ctx, *, text=None):
-    if not is_staff_or_higher(ctx.author):
-        return await ctx.reply("Δεν έχεις δικαίωμα.")
-    if not text:
-        return await ctx.reply("Γράψε τι να πω.")
-    try:
-        await ctx.message.delete()
-    except:
-        pass
-    await ctx.send(text)
-
-
-# ==========================
-# DMALL COMMAND
-# ==========================
-
-
-@bot.command()
-async def dmall(ctx, *, text=None):
-    if not is_owner_or_ceo(ctx.author):
-        return await ctx.reply("Μόνο Owner/CEO.")
-    if not text:
-        return await ctx.reply("Γράψε μήνυμα.")
-    await ctx.reply("Ξεκινάω να στέλνω DM…")
-
-    async for member in ctx.guild.fetch_members(limit=None):
-        if member.bot:
+        if role.is_default():
             continue
-        try:
-            await member.send(text)
-        except:
-            pass
-        await ctx.send(text)
+        await log_ch.send(f"➖ Role `{role.name}` removed from {after.mention}")
 
-
-# ==========================
-# MODERATION COMMANDS
-# ==========================
-
-
-@bot.command()
-async def kick(ctx, member: discord.Member = None, *, reason=None):
-    if not is_staff_or_higher(ctx.author):
-        return await ctx.reply("Δεν έχεις δικαίωμα.")
-    if member is None:
-        return await ctx.reply("Κάνε mention τον χρήστη.")
-    if reason is None:
-        return await ctx.reply("Γράψε reason.")
-    try:
-        await member.kick(reason=reason)
-        await ctx.reply(f"Kick: {member.mention} | Reason: {reason}")
-    except:
-        await ctx.reply("Δεν μπόρεσα να κάνω kick.")
-
-
-@bot.command()
-async def ban(ctx, member: discord.Member = None, *, reason=None):
-    if not is_staff_or_higher(ctx.author):
-        return await ctx.reply("Δεν έχεις δικαίωμα.")
-    if member is None:
-        return await ctx.reply("Κάνε mention τον χρήστη.")
-    if reason is None:
-        return await ctx.reply("Γράψε reason.")
-    try:
-        await member.ban(reason=reason)
-        await ctx.reply(f"Ban: {member.mention} | Reason: {reason}")
-    except:
-        await ctx.reply("Δεν μπόρεσα να κάνω ban.")
-
-
-@bot.command()
-async def unban(ctx, user_id: int = None, *, reason=None):
-    if not is_staff_or_higher(ctx.author):
-        return await ctx.reply("Δεν έχεις δικαίωμα.")
-    if user_id is None:
-        return await ctx.reply("Γράψε user ID.")
-    if reason is None:
-        return await ctx.reply("Γράψε reason.")
-    try:
-        user = await bot.fetch_user(user_id)
-        await ctx.guild.unban(user, reason=reason)
-        await ctx.reply(f"Unban: {user} | Reason: {reason}")
-    except:
-        await ctx.reply("Δεν μπόρεσα να κάνω unban.")
-
-
-@bot.command()
-async def timeout(ctx,
-                  member: discord.Member = None,
-                  minutes: int = None,
-                  *,
-                  reason=None):
-    if not is_staff_or_higher(ctx.author):
-        return await ctx.reply("Δεν έχεις δικαίωμα.")
-    if member is None:
-        return await ctx.reply("Κάνε mention.")
-    if minutes is None:
-        return await ctx.reply("Γράψε λεπτά.")
-    if reason is None:
-        return await ctx.reply("Γράψε reason.")
-
-    try:
-        until = discord.utils.utcnow() + discord.timedelta(minutes=minutes)
-        await member.edit(timeout=until, reason=reason)
-        await ctx.reply(
-            f"Timeout: {member.mention} για {minutes} λεπτά | Reason: {reason}"
-        )
-    except:
-        await ctx.reply("Δεν μπόρεσα να κάνω timeout.")
-
-
-# ==========================
-# TEMPORARY SUPPORT CALL
-# ==========================
-
-import time
-user_cooldown = {}  # user_id : timestamp
+# ================== VOICE LOGS + TEMP VOICE ==================
 
 @bot.event
-async def on_voice_state_update(member, before, after):
-    try:
-        # Αν δεν άλλαξε κανάλι, μην κάνεις τίποτα
-        if before.channel == after.channel:
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    guild = member.guild
+    log_ch = guild.get_channel(VOICE_LOG_ID)
+
+    # Logs
+    if before.channel != after.channel:
+        if before.channel is None and after.channel is not None:
+            if log_ch:
+                await log_ch.send(f"🔊 {member.mention} joined voice: `{after.channel.name}`")
+        elif before.channel is not None and after.channel is None:
+            if log_ch:
+                await log_ch.send(f"🔇 {member.mention} left voice: `{before.channel.name}`")
+        else:
+            if log_ch:
+                await log_ch.send(f"🔁 {member.mention} moved voice: `{before.channel.name}` → `{after.channel.name}`")
+
+    # Temp voice: όταν μπαίνει στο SUPPORT_VOICE_HUB_ID
+    temp_category = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
+
+    # Join hub → create temp
+    if after.channel and after.channel.id == SUPPORT_VOICE_HUB_ID:
+        if not isinstance(temp_category, discord.CategoryChannel):
             return
-
-        # Αν ο χρήστης δεν μπήκε σε κανάλι, μην κάνεις τίποτα
-        if after.channel is None:
-            return
-
-        # Αν δεν μπήκε στο support channel, μην κάνεις τίποτα
-        if after.channel.id != SUPPORT_CALL_VC_ID:
-            return
-
-        # ==========================
-        # COOLDOWN 5 SECONDS
-        # ==========================
-        now = time.time()
-        if member.id in user_cooldown:
-            if now - user_cooldown[member.id] < 5:
-                return  # Μην ξαναφτιάξεις κανάλι
-        user_cooldown[member.id] = now
-
-        guild = member.guild
-        category = guild.get_channel(TEMP_SUPPORT_CATEGORY_ID)
-
-        # Αν υπάρχει ήδη temp channel για αυτόν τον χρήστη
-        for ch in category.voice_channels:
-            if ch.name == f"support-{member.name}":
-                await member.move_to(ch)
-                return
-
-        # Δημιουργία προσωρινού voice channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
-            member: discord.PermissionOverwrite(view_channel=True, connect=True),
+            member: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
         }
+        for rid in [SUPPORT_ROLE_ID, MANAGER_ROLE_ID, OWNER_ROLE_ID, CEO_ROLE_ID]:
+            role = guild.get_role(rid)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True)
 
         temp_channel = await guild.create_voice_channel(
-            name=f"support-{member.name}",
-            category=category,
+            name=f"Support - {member.name}",
+            category=temp_category,
             overwrites=overwrites,
-            reason="Temporary support call"
+            reason=f"Temp support voice for {member}"
         )
 
-        # Μετακίνηση χρήστη στο νέο κανάλι
-        await member.move_to(temp_channel)
+        await member.move_to(temp_channel, reason="Moved to temp support voice")
 
-        # Διαγραφή όταν αδειάσει
-        async def delete_when_empty():
-            await asyncio.sleep(5)
-            while True:
-                ch = guild.get_channel(temp_channel.id)
-                if not ch or len(ch.members) == 0:
-                    try:
-                        await temp_channel.delete(reason="Temp support call empty")
-                    except:
-                        pass
-                    break
-                await asyncio.sleep(10)
+    # Auto delete temp voice όταν αδειάσει
+    if before.channel and before.channel.category_id == TEMP_VOICE_CATEGORY_ID:
+        if len(before.channel.members) == 0:
+            try:
+                await before.channel.delete(reason="Temp voice empty")
+            except:
+                pass
 
-        bot.loop.create_task(delete_when_empty())
+# ================== MODERATION COMMANDS ==================
 
-    except Exception as e:
-        print("Temp call error:", e)
-        
-from flask import Flask
-from threading import Thread
-import os
-app = Flask(__name__)
+@bot.command()
+async def clear(ctx, amount: int):
+    if not is_moderator(ctx.author):
+        return await ctx.reply("❌ Δεν έχεις δικαίωμα.")
+    await ctx.channel.purge(limit=amount + 1)
+    await ctx.send(f"🧹 Έγινε clear {amount} μηνύματα.", delete_after=3)
 
-@app.route('/')
-def home():
-    return "Bot is running on Koyeb!"
+    log_ch = ctx.guild.get_channel(MOD_LOG_ID)
+    if log_ch:
+        await log_ch.send(f"🧹 Clear {amount} messages by {ctx.author.mention} in {ctx.channel.mention}")
 
-def run_web():
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host='0.0.0.0', port=port)
+@bot.command()
+async def kick(ctx, member: discord.Member, *, reason="No reason"):
+    if not is_moderator(ctx.author):
+        return await ctx.reply("❌ Δεν έχεις δικαίωμα.")
+    await member.kick(reason=reason)
+    await ctx.send(f"👢 Έγινε kick ο {member.mention}.")
 
-def keep_alive():
-    t = Thread(target=run_web)
-    t.start()
+    log_ch = ctx.guild.get_channel(MOD_LOG_ID)
+    if log_ch:
+        await log_ch.send(f"👢 Kick: {member.mention} by {ctx.author.mention} | Reason: {reason}")
+
+@bot.command()
+async def ban(ctx, member: discord.Member, *, reason="No reason"):
+    if not is_moderator(ctx.author):
+        return await ctx.reply("❌ Δεν έχεις δικαίωμα.")
+    await member.ban(reason=reason)
+    await ctx.send(f"🔨 Έγινε ban ο {member.mention}.")
+
+    log_ch = ctx.guild.get_channel(MOD_LOG_ID)
+    if log_ch:
+        await log_ch.send(f"🔨 Ban: {member.mention} by {ctx.author.mention} | Reason: {reason}")
+
+@bot.command()
+async def timeout(ctx, member: discord.Member, minutes: int, *, reason="No reason"):
+    if not is_moderator(ctx.author):
+        return await ctx.reply("❌ Δεν έχεις δικαίωμα.")
+    duration = discord.utils.utcnow() + discord.utils.timedelta(minutes=minutes)
+    await member.timeout(duration, reason=reason)
+    await ctx.send(f"⏳ Timeout {minutes} λεπτά στον {member.mention}.")
+
+    log_ch = ctx.guild.get_channel(MOD_LOG_ID)
+    if log_ch:
+        await log_ch.send(f"⏳ Timeout: {member.mention} for {minutes} minutes by {ctx.author.mention} | Reason: {reason}")
+
+# ================== READY + PERSISTENT VIEWS ==================
+
+@bot.event
+async def on_ready():
+    bot.add_view(SupportTicketPanel())
+    bot.add_view(BuyTicketPanel())
+    print(f"Bot online as {bot.user}")
+
+# ================== RUN (FLASK + TOKEN) ==================
+
 keep_alive()
 bot.run(os.getenv("TOKEN"))
-
-
-
 
 
 
