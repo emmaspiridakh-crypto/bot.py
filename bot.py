@@ -405,11 +405,11 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 # ================== VOICE LOGS + TEMP VOICE ==================
 
 @bot.event
-async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+async def on_voice_state_update(member, before, after):
     guild = member.guild
     log_ch = guild.get_channel(VOICE_LOG_ID)
 
-    # Logs
+    # Logging
     if before.channel != after.channel:
         if before.channel is None and after.channel is not None:
             if log_ch:
@@ -419,19 +419,18 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 await log_ch.send(f"🔇 {member.mention} left voice: `{before.channel.name}`")
         else:
             if log_ch:
-                await log_ch.send(f"🔁 {member.mention} moved voice: `{before.channel.name}` → `{after.channel.name}`")
+                await log_ch.send(f"🔁 {member.mention} moved: `{before.channel.name}` → `{after.channel.name}`")
 
-    # Temp voice: όταν μπαίνει στο SUPPORT_VOICE_HUB_ID
+    # TEMP VOICE SYSTEM
     temp_category = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
 
-    # Join hub → create temp
+    # 1) Create temp channel when user joins the hub
     if after.channel and after.channel.id == SUPPORT_VOICE_HUB_ID:
-        if not isinstance(temp_category, discord.CategoryChannel):
-            return
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
             member: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
         }
+
         for rid in [SUPPORT_ROLE_ID, MANAGER_ROLE_ID, OWNER_ROLE_ID, CEO_ROLE_ID]:
             role = guild.get_role(rid)
             if role:
@@ -440,19 +439,23 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         temp_channel = await guild.create_voice_channel(
             name=f"Support - {member.name}",
             category=temp_category,
-            overwrites=overwrites,
-            reason=f"Temp support voice for {member}"
+            overwrites=overwrites
         )
 
-        await member.move_to(temp_channel, reason="Moved to temp support voice")
+        await member.move_to(temp_channel)
 
-    # Auto delete temp voice όταν αδειάσει
-    if before.channel and before.channel.category_id == TEMP_VOICE_CATEGORY_ID:
-        if len(before.channel.members) == 0:
-            try:
-                await before.channel.delete(reason="Temp voice empty")
-            except:
-                pass
+    # 2) Delete ONLY temp channels (NOT the hub)
+    if before.channel:
+        # must be inside temp category
+        if before.channel.category_id == TEMP_VOICE_CATEGORY_ID:
+            # must NOT be the hub
+            if before.channel.id != SUPPORT_VOICE_HUB_ID:
+                # must be empty
+                if len(before.channel.members) == 0:
+                    try:
+                        await before.channel.delete()
+                    except:
+                        pass
 
 # ================== MODERATION COMMANDS ==================
 
@@ -513,6 +516,7 @@ async def on_ready():
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
+
 
 
 
