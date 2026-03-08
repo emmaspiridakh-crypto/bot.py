@@ -409,25 +409,27 @@ async def on_voice_state_update(member, before, after):
     guild = member.guild
     log_ch = guild.get_channel(VOICE_LOG_ID)
 
-    # Logging (clean, no duplicates)
-if before.channel != after.channel:
-    if before.channel is None and after.channel is not None:
-        # Joined
-        if log_ch:
-            await log_ch.send(f"🔊 {member.mention} joined `{after.channel.name}`")
-    elif before.channel is not None and after.channel is None:
-        # Left
-        if log_ch:
-            await log_ch.send(f"🔇 {member.mention} left `{before.channel.name}`")
-    else:
-        # Moved
-        if log_ch:
-            await log_ch.send(f"🔁 {member.mention} moved `{before.channel.name}` → `{after.channel.name}`")
+    # ---------------- LOGGING ----------------
+    if before.channel != after.channel:
+        if before.channel is None and after.channel is not None:
+            if log_ch:
+                await log_ch.send(f"🟣 {member.mention} joined `{after.channel.name}`")
 
-    # TEMP VOICE SYSTEM
+        elif before.channel is not None and after.channel is None:
+            if log_ch:
+                await log_ch.send(f"🔴 {member.mention} left `{before.channel.name}`")
+
+        else:
+            if log_ch:
+                await log_ch.send(
+                    f"🟡 {member.mention} moved `{before.channel.name}` → `{after.channel.name}`"
+                )
+
+    # ---------------- TEMP VOICE ----------------
+    
     temp_category = guild.get_channel(TEMP_VOICE_CATEGORY_ID)
 
-    # 1) Create temp channel when user joins the hub
+    # Create temp channel when joining hub
     if after.channel and after.channel.id == SUPPORT_VOICE_HUB_ID:
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
@@ -447,19 +449,15 @@ if before.channel != after.channel:
 
         await member.move_to(temp_channel)
 
-   # Delete ONLY temp channels
-if before.channel:
-    # must be inside temp category
-    if before.channel.category_id == TEMP_VOICE_CATEGORY_ID:
-        # must NOT be the hub
-        if before.channel.id != SUPPORT_VOICE_HUB_ID:
-            # must be empty
-            if len(before.channel.members) == 0:
-                try:
-                    await before.channel.delete()
-                except:
-                    pass
-
+    # Delete ONLY temp channels (NOT the hub)
+    if before.channel:
+        if before.channel.category_id == TEMP_VOICE_CATEGORY_ID:
+            if before.channel.id != SUPPORT_VOICE_HUB_ID:
+                if len(before.channel.members) == 0:
+                    try:
+                        await before.channel.delete()
+                    except:
+                        pass
 # ================== MODERATION COMMANDS ==================
 
 @bot.command()
@@ -519,6 +517,7 @@ async def on_ready():
 
 keep_alive()
 bot.run(os.getenv("TOKEN"))
+
 
 
 
