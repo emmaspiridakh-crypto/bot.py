@@ -307,7 +307,9 @@ class MainTicketSelect(discord.ui.Select):
             discord.SelectOption(label="Owner", emoji="👑"),
             discord.SelectOption(label="Bug", emoji="🐞"),
             discord.SelectOption(label="Report", emoji="📙"),
-            discord.SelectOption(label="Support", emoji="💬"),
+            discord.SelectOption(label="Order", emoji="📦"),
+            discord.SelectOption(label="Buy", emoji="💸"),
+            discord.SelectOption(label="Support", emoji="💬")
         ]
 
         super().__init__(
@@ -345,6 +347,16 @@ class MainTicketSelect(discord.ui.Select):
             roles_ids = [MANAGER_ID, OWNER_ID, CEO_ID]
             name = f"report-{author.name}".replace(" ", "-").lower()
             ticket_type = "Report"
+
+        elif self.values[0] == "Order":
+            roles_ids = [MANAGER_ID, DEVELOPER_ID, OWNER_ID, CEO_ID]
+            name = f"report-{author.name}".replace(" ", "-").lower()
+            ticket_type = "Order"
+
+        elif self.values[0] == "Buy":
+            roles_ids = [OWNER_ID, CEO_ID]
+            name = f"report-{author.name}".replace(" ", "-").lower()
+            ticket_type = "Buy"
 
         else:
             roles_ids = [STAFF_ID, OWNER_ID, CEO_ID]
@@ -402,7 +414,7 @@ class MainTicketPanel(discord.ui.View):
         super().__init__(timeout=None)
 
         embed = discord.Embed(
-            title="Crown Studio — Support Panel",
+            title="Crown Studio — Ticket Panel",
             description=(
                 "**Επίλεξε την κατηγορία που ταιριάζει στο αίτημά σου.**\n"
                 "Το προσωπικό θα σε εξυπηρετήσει άμεσα."
@@ -410,7 +422,7 @@ class MainTicketPanel(discord.ui.View):
             color=discord.Color.from_rgb(20, 20, 25)
         )
 
-        embed.set_image(url="https://i.imgur.com/lLoG1Gz.jpeg")
+        embed.set_image(url="https://i.imgur.com/xyH3t75.png")
         embed.timestamp = discord.utils.utcnow()
 
         self.embed = embed
@@ -632,7 +644,7 @@ async def ticketpanel(ctx):
         return await ctx.reply("Δεν έχεις δικαίωμα να στείλεις το panel.")
 
     embed = discord.Embed(
-            title="Crown Studio — Support Panel",
+            title="Crown Studio — Ticket Panel",
             description=(
                 "**Επίλεξε την κατηγορία που ταιριάζει στο αίτημά σου.**\n"
                 "Το προσωπικό θα σε εξυπηρετήσει άμεσα."
@@ -640,8 +652,8 @@ async def ticketpanel(ctx):
             color=discord.Color.from_rgb(20, 20, 25)  # dark neon base
         )
 
-    embed.set_image(url="https://i.imgur.com/lLoG1Gz.jpeg")
-    embed.set_footer(text="Crown Studio • Support System")
+    embed.set_image(url="https://i.imgur.com/xyH3t75.png")
+    embed.set_footer(text="Crown Studio • Ticket System")
 
     await ctx.send(embed=embed, view=MainTicketPanel())
     await ctx.reply("Το νέο ticket panel στάλθηκε.", delete_after=2)
